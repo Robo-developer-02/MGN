@@ -85,7 +85,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 # swap to "whisper-large-v3" if you want the more accurate (slower) model.
 STT_MODEL  = "whisper-large-v3-turbo"
 # Groq-hosted chat model.
-CHAT_MODEL = "openai/gpt-oss-120b"
+CHAT_MODEL = "openai/gpt-oss-20b"
 
 TTS_VOICE_EN = "en-US-JennyNeural"
 TTS_VOICE_HI = "hi-IN-SwaraNeural"
@@ -98,7 +98,7 @@ CHANNELS    = 1
 # to use more tokens per word than English) without slowing down short
 # replies at all -- the model still stops at finish_reason="stop" on its
 # own; this ceiling only matters for answers that actually needed the room.
-MAX_TOKENS  = 210
+MAX_TOKENS  = 180
 # Keep only the most recent N user/assistant turn-pairs per language in the
 # prompt. Without this, history grows for as long as the bot stays awake at
 # an event (hours), which slowly inflates every future prompt and therefore
@@ -174,6 +174,15 @@ PRINT_LATENCY_TIMINGS = True
 # falls back to the original synth-then-play path, so this is safe to
 # leave on even if mpg123 isn't installed yet.
 STREAM_TTS_PLAYBACK = True
+# Diagnostic only -- times the pieces INSIDE transcribe_segment() (WAV
+# encode, the actual Groq API call, and whether the SDK silently retried
+# after a transient failure) and prints them per segment. The mystery
+# 5000ms-ish STT spikes aren't explained by connection setup (IPv6/IPv4
+# connect both came back under 60ms), so this narrows down whether the
+# time is Groq's response itself or a retry+backoff. Off by default --
+# turn on only while chasing this, then back off; it's a couple of
+# time.time() calls plus a print, negligible overhead either way.
+DEBUG_STT_TIMING = False
 
 WAKE_WORDS = ["hello", "hey"]
 
@@ -638,11 +647,29 @@ def transcribe_segment(audio: np.ndarray) -> Tuple[str, str]:
     buf.seek(0)
     buf.name = "segment.wav"   # SDK uses this for the upload filename
 
+    if DEBUG_STT_TIMING:
+        audio_secs = len(audio) / SAMPLE_RATE
+        _t_encode_done = time.time()
+        _t_api_start = time.time()
+
     result = client.audio.transcriptions.create(
         model=STT_MODEL,
         file=buf,
         response_format="verbose_json",
     )
+
+    if DEBUG_STT_TIMING:
+        _t_api_done = time.time()
+        # x-groq-* headers (when present) confirm whether the SDK retried
+        # this request under the hood -- if retry_count shows >0 here, the
+        # 5s is a retry+backoff, not Groq's own response time.
+        raw_response = getattr(result, "_request_id", None)
+        print(
+            f"   ⏱️  [STT DEBUG] audio={audio_secs:.2f}s  "
+            f"encode={(_t_api_start - _t_encode_done)*1000:.0f}ms  "
+            f"api_call={(_t_api_done - _t_api_start)*1000:.0f}ms  "
+            f"request_id={raw_response}"
+        )
 
     text = (result.text or "").strip()
 
@@ -663,17 +690,18 @@ def transcribe_segment(audio: np.ndarray) -> Tuple[str, str]:
         if avg_no_speech >= NO_SPEECH_PROB_THRESHOLD and avg_logprob <= AVG_LOGPROB_THRESHOLD:
             return "", "en"
 
-    lang = (result.language or "en").strip().lower()
-    if lang == "ur":
-        lang = "hi"
-    if lang not in ("hi", "en"):
-        lang = "en"
-
-    for ch in text:
-        cp = ord(ch)
-        if 0x0900 <= cp <= 0x097F or 0x0600 <= cp <= 0x06FF:
-            lang = "hi"
-            break
+    # Script scan is the ground-truth signal (per the module docstring's own
+    # 3-layer design: Whisper tag is fast-but-sometimes-wrong, script scan
+    # is ground truth, default -> English). The scan previously only ever
+    # upgraded en -> hi; it never corrected the other direction, so a short
+    # clip Whisper mis-tagged as "hi" (a known weak spot on short audio)
+    # stayed "hi" even when the transcript itself is plain Latin-script
+    # English -- e.g. "Avengers movie" got answered in Hindi. Now the scan
+    # decides both ways, exactly as documented: Devanagari/Urdu present ->
+    # hi, none present -> en, regardless of Whisper's own tag.
+    lang = "hi" if any(
+        0x0900 <= ord(ch) <= 0x097F or 0x0600 <= ord(ch) <= 0x06FF for ch in text
+    ) else "en"
 
     return text, lang
 
