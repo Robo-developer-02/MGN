@@ -1,21 +1,21 @@
 [Unit]
-Description=DPS — Service
+Description=mgn — Service
 After=network-online.target sound.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=lucy
-Group=lucy
+User=mgn
+Group=mgn
 
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do ping -c1 -W1 8.8.8.8 &>/dev/null && exit 0; sleep 1; done; exit 0'
 
-WorkingDirectory=/home/lucy/Desktop/seminar
-ExecStart=/home/lucy/Desktop/seminar/venv/bin/python \
-          /home/lucy/Desktop/seminar/main.py
+WorkingDirectory=/home/mgn/Desktop/mgn
+ExecStart=/home/mgn/Desktop/mgn/venv/bin/python \
+          /home/mgn/Desktop/mgn/main.py
 
-Environment=PATH=/home/lucy/Desktop/seminar/venv/bin:/usr/local/bin:/usr/bin:/bin
-EnvironmentFile=/home/lucy/Desktop/seminar/.env
+Environment=PATH=/home/mgn/Desktop/mgn/venv/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/home/mgn/Desktop/mgn/.env
 Environment=PULSE_RUNTIME_PATH=/run/user/1000/pulse
 Environment=PYTHONUNBUFFERED=1
 
