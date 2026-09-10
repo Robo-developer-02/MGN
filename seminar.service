@@ -1,12 +1,17 @@
 [Unit]
 Description=mgn — Service
-After=network-online.target sound.target
+# Start only after network and sound subsystem are ready.
+# This is now a USER unit (like the working dtbot.service), so it runs
+# inside mgn's own systemd/session instance and gets a real PulseAudio
+# socket without needing a graphical auto-login.
+After=network-online.target sound.target pulseaudio.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=mgn
-Group=mgn
+# No User=/Group= here on purpose — user units already run as the owning
+# user (mgn). Adding them back would make systemd treat this as a system
+# unit again and you'd lose the session/PulseAudio access this fixes.
 
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do ping -c1 -W1 8.8.8.8 &>/dev/null && exit 0; sleep 1; done; exit 0'
 
@@ -14,16 +19,32 @@ WorkingDirectory=/home/mgn/Desktop/mgn
 ExecStart=/home/mgn/Desktop/mgn/venv/bin/python \
           /home/mgn/Desktop/mgn/main.py
 
+# ── Environment ───────────────────────────────────────────
+# Give the venv python priority in PATH
 Environment=PATH=/home/mgn/Desktop/mgn/venv/bin:/usr/local/bin:/usr/bin:/bin
+# Load the project .env file
 EnvironmentFile=/home/mgn/Desktop/mgn/.env
+# PulseAudio runtime socket — required for pygame/sounddevice audio.
+# Adjust 1000 if `id -u mgn` gives a different UID.
 Environment=PULSE_RUNTIME_PATH=/run/user/1000/pulse
 Environment=PYTHONUNBUFFERED=1
 
+# ── Restart policy ────────────────────────────────────────
 Restart=always
 RestartSec=5
 
+# On stop/shutdown, systemd sends SIGTERM then waits this long before
+# SIGKILL-ing the whole process group. Default is 90s, which is exactly
+# the 1m30s delay you were seeing on shutdown/reboot. 7s gives the
+# process a brief chance to exit cleanly, then forces it.
+TimeoutStopSec=7
+KillMode=control-group
+KillSignal=SIGTERM
+
+# ── Logging ───────────────────────────────────────────────
+# View with: journalctl --user -u seminar.service -f
 StandardOutput=journal
 StandardError=journal
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
