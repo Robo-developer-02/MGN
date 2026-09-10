@@ -1,4 +1,5 @@
 """
+question and answer in the same language 
 
 ============================================================
   🤖 Speech-to-Speech AI Chatbot — Powered by Sarvam AI
@@ -87,8 +88,8 @@ CHAT_MODEL = "sarvam-105b-conversations"
 # "priya" is a production-recommended female voice for Hindi and also
 # works well across English/Indic languages. Speaker names are lowercase.
 TTS_MODEL = "bulbul:v3"
-TTS_VOICE_EN = "ishita"
-TTS_VOICE_HI = "ishita"
+TTS_VOICE_EN = "roopa"
+TTS_VOICE_HI = "roopa"
 TTS_SAMPLE_RATE = 24000
 TTS_PACE = 1.0
 TTS_TEMPERATURE = 0.6
@@ -101,7 +102,7 @@ CHANNELS    = 1
 # to use more tokens per word than English) without slowing down short
 # replies at all -- the model still stops at finish_reason="stop" on its
 # own; this ceiling only matters for answers that actually needed the room.
-MAX_TOKENS  = 50
+MAX_TOKENS  = 80
 # Keep only the most recent N user/assistant turn-pairs per language in the
 # prompt. Without this, history grows for as long as the bot stays awake at
 # an event (hours), which slowly inflates every future prompt and therefore
@@ -185,13 +186,14 @@ SYSTEM_EN = (
     "Your name is Aayro. You are a helpful AI assistant created by Robotwala. "
     "Answer the user's full question directly and accurately — never ignore part of "
     "a multi-part question. "
-    "you are a female robot , and always use rhi hu etc.."
+    "you are a female robot answer the questions accordingly."
     "Keep replies natural and conversational, as long as they need to be to "
     "actually answer the question well — don't pad, but don't cut yourself short either. "
     "No bullet points or markdown, no filler like 'great question'. "
-    "If the user's language is Hindi, always respond in Hindi written in Devanagari script, "
-    "even if the user's input is written in Urdu (Perso-Arabic) script or Roman Hindi. "
-    "Never respond in the Urdu script. "
+    "The user is speaking English in this conversation, so you must always respond in "
+    "English, in the Latin script only — never switch to Hindi or Devanagari script, "
+    "even if a word or phrase in the user's message happens to be a Hindi/Urdu loanword "
+    "or name. "
     "Keep your full answer under roughly 150 words — you have a hard output limit, so "
     "finish your thought rather than running long."
 )
@@ -200,7 +202,7 @@ SYSTEM_HI = (
     "Aapka naam Aayro hai. Aap Robotwala dwara banaya gaya helpful AI assistant hain. "
     "User ke poore sawaal ka seedha aur sahi jawab dein — agar sawaal ke kai hisse hain "
     "to kisi bhi hisse ko nazarandaz mat karein. "
-    "tumhe rhi hu etc ka use krna hai , tum ek female ho "
+    "tum ek female ho , usko hisaab se answer krna ."
     "Jawab natural aur batcheet ke andaz mein dein — sawaal ka sahi jawab dene ke liye "
     "jitna zaroori ho utna lamba rakhein, na zyada padding karein na jawab ko jabardasti chhota karein. "
     "Koi bullet points ya markdown nahi, 'great question' jaisa filler nahi. "
@@ -702,11 +704,38 @@ def transcribe_segment(audio: np.ndarray) -> Tuple[str, str]:
 
     # Script scan remains the authoritative language decision, just as in the
     # original design. Devanagari/Urdu -> Hindi; otherwise -> English.
-    lang = "hi" if any(
-        0x0900 <= ord(ch) <= 0x097F or 0x0600 <= ord(ch) <= 0x06FF for ch in text
-    ) else "en"
+    #
+    # NOTE: this is proportion-based, not "any single character". A
+    # multilingual ASR model will occasionally transliterate one stray word
+    # (a filler sound, a loanword, a proper noun) into Devanagari even when
+    # the speaker was clearly speaking English -- treating that one
+    # character as proof of Hindi was flipping otherwise-English segments
+    # to Hindi and dragging the whole turn's reply language with it.
+    lang = _script_scan_lang(text)
 
     return text, lang
+
+
+def _script_scan_lang(text: str) -> str:
+    """Decide hi/en from script composition, requiring the Devanagari/Urdu
+    share of the *lettered* characters to be non-trivial (not just one
+    stray character) before calling it Hindi."""
+    hi_count = 0
+    letter_count = 0
+    for ch in text:
+        cp = ord(ch)
+        is_hi = 0x0900 <= cp <= 0x097F or 0x0600 <= cp <= 0x06FF
+        is_latin_letter = ch.isalpha() and cp < 0x0250  # rough Latin-letter range
+        if is_hi:
+            hi_count += 1
+            letter_count += 1
+        elif is_latin_letter:
+            letter_count += 1
+    if letter_count == 0:
+        return "en"
+    # Require Devanagari/Urdu to be a real fraction of the lettered content,
+    # not a single stray transliterated word.
+    return "hi" if (hi_count / letter_count) >= 0.3 else "en"
 
 
 def capture_and_transcribe(timeout: float, track_timing: bool = False) -> Tuple[Optional[str], str]:
@@ -827,12 +856,12 @@ def capture_and_transcribe(timeout: float, track_timing: bool = False) -> Tuple[
     combined = " ".join(p for p in pieces if p.strip()).strip()
 
     # Re-run the script scan over the FULL combined text so language never
-    # flips mid-sentence just because one short segment mis-detected.
-    for ch in combined:
-        cp = ord(ch)
-        if 0x0900 <= cp <= 0x097F or 0x0600 <= cp <= 0x06FF:
-            lang = "hi"
-            break
+    # flips mid-turn just because one short segment mis-detected. This uses
+    # the same proportion-based decision as transcribe_segment() -- a single
+    # stray Devanagari character from one mis-transcribed segment should not
+    # be able to override an otherwise clearly-English turn.
+    if combined:
+        lang = _script_scan_lang(combined)
 
     if not combined or len(combined) < 1:
         return None, lang
@@ -1036,7 +1065,7 @@ def main():
                     state = State.LISTENING
                     print("\n✅ Wake word detected!")
                     try:
-                        speak_blocking("Haan, mein sun raha hoon. Aap apna sawaal poochhiye.", lang="hi")
+                        speak_blocking("Haan, mein sun rahi hoon. Aap apna sawaal poochhiye.", lang="hi")
                     except Exception as e:
                         handle_error(e, "wake acknowledgement")
                 else:
@@ -1057,7 +1086,7 @@ def main():
                     print(f"\n⏱️  No speech for {int(IDLE_TIMEOUT)}s — going idle.")
                     try:
                         speak_blocking(
-                            "Mein abhi idle mode mein ja raha hoon. Jab zaroorat ho, 'Hello' kahiye.",
+                            "Mein abhi idle mode mein ja rahi hoon. Jab zaroorat ho, 'Hello' kahiye.",
                             lang="hi",
                         )
                     except Exception as e:
